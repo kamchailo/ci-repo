@@ -150,7 +150,7 @@ jobs:
 
           COMMENT_TEXT="✅ **Deploy succeeded** — uploaded to TestFlight
 
-[View run](${RUN_URL})"
+          [View run](${RUN_URL})"
 
           jq -n --arg body "$COMMENT_TEXT" '{"body": $body}' > $RUNNER_TEMP/comment.json
 
@@ -173,22 +173,22 @@ jobs:
             LOG_CONTENT=$(head -c 60000 source/deploy.log)
             COMMENT_TEXT="${COMMENT_TEXT}
 
-<details><summary>Full deploy log</summary>
+          <details><summary>Full deploy log</summary>
 
-\`\`\`
-${LOG_CONTENT}
-\`\`\`"
+          \`\`\`
+          ${LOG_CONTENT}
+          \`\`\`"
             if [ "$(wc -c < source/deploy.log)" -gt 60000 ]; then
               COMMENT_TEXT="${COMMENT_TEXT}
 
-⚠️ Log truncated (exceeded 60KB)"
+          ⚠️ Log truncated (exceeded 60KB)"
             fi
             COMMENT_TEXT="${COMMENT_TEXT}
-</details>"
+          </details>"
           fi
           COMMENT_TEXT="${COMMENT_TEXT}
 
-[View run](${RUN_URL})"
+          [View run](${RUN_URL})"
 
           jq -n --arg body "$COMMENT_TEXT" '{"body": $body}' > $RUNNER_TEMP/comment.json
 

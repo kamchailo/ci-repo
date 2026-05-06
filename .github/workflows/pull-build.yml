@@ -144,22 +144,22 @@ jobs:
             LOG_CONTENT=$(head -c 60000 source/test.log)
             COMMENT_TEXT="${COMMENT_TEXT}
 
-<details><summary>Full test log</summary>
+          <details><summary>Full test log</summary>
 
-\`\`\`
-${LOG_CONTENT}
-\`\`\`"
+          \`\`\`
+          ${LOG_CONTENT}
+          \`\`\`"
             if [ "$(wc -c < source/test.log)" -gt 60000 ]; then
               COMMENT_TEXT="${COMMENT_TEXT}
 
-⚠️ Log truncated (exceeded 60KB)"
+          ⚠️ Log truncated (exceeded 60KB)"
             fi
             COMMENT_TEXT="${COMMENT_TEXT}
-</details>"
+          </details>"
           fi
           COMMENT_TEXT="${COMMENT_TEXT}
 
-[View run](${RUN_URL})"
+          [View run](${RUN_URL})"
 
           jq -n --arg body "$COMMENT_TEXT" '{"body": $body}' > $RUNNER_TEMP/comment.json
 
@@ -191,22 +191,22 @@ ${LOG_CONTENT}
             LOG_CONTENT=$(head -c 60000 "$LOG_FILE")
             COMMENT_TEXT="${COMMENT_TEXT}
 
-<details><summary>${LOG_LABEL}</summary>
+          <details><summary>${LOG_LABEL}</summary>
 
-\`\`\`
-${LOG_CONTENT}
-\`\`\`"
+          \`\`\`
+          ${LOG_CONTENT}
+          \`\`\`"
             if [ "$(wc -c < "$LOG_FILE")" -gt 60000 ]; then
               COMMENT_TEXT="${COMMENT_TEXT}
 
-⚠️ Log truncated (exceeded 60KB)"
+          ⚠️ Log truncated (exceeded 60KB)"
             fi
             COMMENT_TEXT="${COMMENT_TEXT}
-</details>"
+          </details>"
           fi
           COMMENT_TEXT="${COMMENT_TEXT}
 
-[View run](${RUN_URL})"
+          [View run](${RUN_URL})"
 
           jq -n --arg body "$COMMENT_TEXT" '{"body": $body}' > $RUNNER_TEMP/comment.json
 
