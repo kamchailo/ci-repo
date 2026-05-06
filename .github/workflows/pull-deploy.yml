@@ -27,7 +27,6 @@ jobs:
           PAT: ${{ secrets.PRIVATE_REPO_PAT }}
         run: |
           git clone --depth 1 --branch "$REF" \
-
             "https://x-access-token:${PAT}@github.com/${PRIVATE_REPO}.git" source 2>/dev/null
           echo "✅ Source cloned"
 
