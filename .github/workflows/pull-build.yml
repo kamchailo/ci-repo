@@ -3,6 +3,7 @@ name: Build & Test (Proxy)
 on:
   repository_dispatch:
     types: [build]
+  workflow_dispatch:
 
 jobs:
   build-and-test:
