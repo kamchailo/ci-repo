@@ -40,7 +40,7 @@ jobs:
             -H "Authorization: token ${PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
-            -d "{\"state\":\"pending\",\"target_url\":\"${RUN_URL}\",\"description\":\"Build & test in progress\",\"context\":\"ci/ci-repo\"}"
+            -d "{\"state\":\"pending\",\"target_url\":\"${RUN_URL}\",\"description\":\"Build & test in progress\",\"context\":\"ci/ci-repo\"}" > /dev/null
 
       - name: Select Xcode
         run: |
@@ -92,15 +92,6 @@ jobs:
             2>&1 | tee build.log > /dev/null
           echo "✅ Build succeeded"
 
-      - name: Show build errors on failure
-        if: failure()
-        working-directory: source
-        run: |
-          if [ -f build.log ]; then
-            echo "=== LAST 20 LINES ==="
-            tail -20 build.log
-          fi
-
       - name: Test
         working-directory: source
         run: |
@@ -116,17 +107,6 @@ jobs:
             -resultBundlePath TestResults.xcresult \
             2>&1 | tee test.log > /dev/null
 
-      - name: Show test errors on failure
-        if: failure()
-        working-directory: source
-        run: |
-          if [ -f test.log ]; then
-            echo "=== TEST ERRORS ==="
-            grep -E "error:|failed" test.log | head -50 || true
-            echo "=== LAST 20 LINES ==="
-            tail -20 test.log
-          fi
-
       - name: Report success status
         if: success()
         env:
@@ -137,7 +117,7 @@ jobs:
             -H "Authorization: token ${PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
-            -d "{\"state\":\"success\",\"target_url\":\"${RUN_URL}\",\"description\":\"Build & test passed\",\"context\":\"ci/ci-repo\"}"
+            -d "{\"state\":\"success\",\"target_url\":\"${RUN_URL}\",\"description\":\"Build & test passed\",\"context\":\"ci/ci-repo\"}" > /dev/null
 
       - name: Report failure status
         if: failure()
@@ -149,7 +129,7 @@ jobs:
             -H "Authorization: token ${PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
-            -d "{\"state\":\"failure\",\"target_url\":\"${RUN_URL}\",\"description\":\"Build or test failed\",\"context\":\"ci/ci-repo\"}"
+            -d "{\"state\":\"failure\",\"target_url\":\"${RUN_URL}\",\"description\":\"Build or test failed\",\"context\":\"ci/ci-repo\"}" > /dev/null
 
       - name: Comment on PR (success)
         if: success() && env.PR_NUMBER != ''
@@ -158,24 +138,35 @@ jobs:
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          # Build full test log for collapsible details block
-          LOG_DETAIL=""
+          COMMENT_TEXT="✅ **Build & tests passed**"
           if [ -f source/test.log ]; then
-            LOG_CONTENT=$(cat source/test.log | head -c 60000 | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/$/\\n/' | tr -d '\n')
-            TRUNCATED=""
-            if [ "$(wc -c < source/test.log)" -gt 60000 ]; then
-              TRUNCATED="\\n\\n⚠️ Log truncated (exceeded 60KB)"
-            fi
-            LOG_DETAIL="\\n\\n<details><summary>Full test log</summary>\\n\\n\`\`\`\\n${LOG_CONTENT}\`\`\`${TRUNCATED}\\n</details>"
-          fi
+            LOG_CONTENT=$(head -c 60000 source/test.log)
+            COMMENT_TEXT="${COMMENT_TEXT}
 
-          BODY="✅ **Build & tests passed**${LOG_DETAIL}\\n\\n[View run](${RUN_URL})"
+<details><summary>Full test log</summary>
+
+\`\`\`
+${LOG_CONTENT}
+\`\`\`"
+            if [ "$(wc -c < source/test.log)" -gt 60000 ]; then
+              COMMENT_TEXT="${COMMENT_TEXT}
+
+⚠️ Log truncated (exceeded 60KB)"
+            fi
+            COMMENT_TEXT="${COMMENT_TEXT}
+</details>"
+          fi
+          COMMENT_TEXT="${COMMENT_TEXT}
+
+[View run](${RUN_URL})"
+
+          jq -n --arg body "$COMMENT_TEXT" '{"body": $body}' > $RUNNER_TEMP/comment.json
 
           curl -s -X POST \
             -H "Authorization: token ${PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${PRIVATE_REPO}/issues/${PR_NUMBER}/comments" \
-            -d "{\"body\":\"${BODY}\"}" > /dev/null
+            -d @$RUNNER_TEMP/comment.json > /dev/null
 
       - name: Comment on PR (failure)
         if: failure() && env.PR_NUMBER != ''
@@ -185,33 +176,44 @@ jobs:
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
           # Grab full log content (test log preferred, fall back to build log)
-          LOG_CONTENT=""
+          COMMENT_TEXT="❌ **Build or tests failed**"
+          LOG_FILE=""
           if [ -f source/test.log ]; then
-            LOG_CONTENT=$(cat source/test.log | head -c 60000 | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/$/\\n/' | tr -d '\n')
-            TRUNCATED=""
-            if [ "$(wc -c < source/test.log)" -gt 60000 ]; then
-              TRUNCATED="\\n\\n⚠️ Log truncated (exceeded 60KB)"
-            fi
+            LOG_FILE="source/test.log"
+            LOG_LABEL="Full build/test log"
           elif [ -f source/build.log ]; then
-            LOG_CONTENT=$(cat source/build.log | head -c 60000 | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/$/\\n/' | tr -d '\n')
-            TRUNCATED=""
-            if [ "$(wc -c < source/build.log)" -gt 60000 ]; then
-              TRUNCATED="\\n\\n⚠️ Log truncated (exceeded 60KB)"
+            LOG_FILE="source/build.log"
+            LOG_LABEL="Full build/test log"
+          fi
+
+          if [ -n "$LOG_FILE" ]; then
+            LOG_CONTENT=$(head -c 60000 "$LOG_FILE")
+            COMMENT_TEXT="${COMMENT_TEXT}
+
+<details><summary>${LOG_LABEL}</summary>
+
+\`\`\`
+${LOG_CONTENT}
+\`\`\`"
+            if [ "$(wc -c < "$LOG_FILE")" -gt 60000 ]; then
+              COMMENT_TEXT="${COMMENT_TEXT}
+
+⚠️ Log truncated (exceeded 60KB)"
             fi
+            COMMENT_TEXT="${COMMENT_TEXT}
+</details>"
           fi
+          COMMENT_TEXT="${COMMENT_TEXT}
 
-          DETAILS=""
-          if [ -n "$LOG_CONTENT" ]; then
-            DETAILS="\\n\\n<details><summary>Full build/test log</summary>\\n\\n\`\`\`\\n${LOG_CONTENT}\`\`\`${TRUNCATED}\\n</details>"
-          fi
+[View run](${RUN_URL})"
 
-          BODY="❌ **Build or tests failed**${DETAILS}\\n\\n[View run](${RUN_URL})"
+          jq -n --arg body "$COMMENT_TEXT" '{"body": $body}' > $RUNNER_TEMP/comment.json
 
           curl -s -X POST \
             -H "Authorization: token ${PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${PRIVATE_REPO}/issues/${PR_NUMBER}/comments" \
-            -d "{\"body\":\"${BODY}\"}" > /dev/null
+            -d @$RUNNER_TEMP/comment.json > /dev/null
 
       - name: Summary
         if: always()
@@ -233,4 +235,6 @@ jobs:
 
       - name: Clean up
         if: always()
-        run: rm -rf source
+        run: |
+          rm -rf source
+          rm -f $RUNNER_TEMP/comment.json
