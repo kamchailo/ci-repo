@@ -17,6 +17,11 @@ jobs:
       PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
 
     steps:
+      - name: Mask sensitive values
+        run: |
+          echo "::add-mask::${REF}"
+          echo "::add-mask::${PR_NUMBER}"
+
       - name: Clone private repo
         env:
           PAT: ${{ secrets.PRIVATE_REPO_PAT }}

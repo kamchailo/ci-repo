@@ -19,6 +19,12 @@ jobs:
       TEST_TARGET: ${{ secrets.SCHEME_NAME }}Tests
 
     steps:
+      - name: Mask sensitive values
+        run: |
+          echo "::add-mask::${REF}"
+          echo "::add-mask::${SHA}"
+          echo "::add-mask::${PR_NUMBER}"
+
       - name: Clone private repo
         env:
           PAT: ${{ secrets.PRIVATE_REPO_PAT }}
@@ -167,7 +173,7 @@ jobs:
             -H "Authorization: token ${PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${PRIVATE_REPO}/issues/${PR_NUMBER}/comments" \
-            -d @$RUNNER_TEMP/comment.json > /dev/null
+            -d @$RUNNER_TEMP/comment.json -w "\nHTTP Status: %{http_code}\n"
 
       - name: Comment on PR (failure)
         if: failure() && env.PR_NUMBER != ''
