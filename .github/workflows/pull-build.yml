@@ -116,20 +116,6 @@ jobs:
             -resultBundlePath TestResults.xcresult \
             2>&1 | tee test.log > /dev/null
 
-          # Parse test results — handle both Swift Testing and XCTest formats
-          echo ""
-          echo "=== Test Results ==="
-          # Swift Testing format: ✔ Test "name()" passed / ✘ Test "name()" failed
-          grep -E "^[✔✘]" test.log | sed -E \
-            -e 's/^✔ Test "(.+)" passed.*/✅ \1 — PASSED/' \
-            -e 's/^✘ Test "(.+)" failed.*/❌ \1 — FAILED/' \
-            || true
-          # XCTest format fallback
-          grep "Test Case" test.log | sed -E \
-            -e "s/.*Test Case '-\[([^ ]+) ([^]]+)\]' passed.*/✅ \1\/\2 — PASSED/" \
-            -e "s/.*Test Case '-\[([^ ]+) ([^]]+)\]' failed.*/❌ \1\/\2 — FAILED/" \
-            || true
-
       - name: Show test errors on failure
         if: failure()
         working-directory: source
