@@ -1,0 +1,205 @@
+name: Deploy to TestFlight (Proxy)
+
+on:
+  repository_dispatch:
+    types: [deploy]
+
+jobs:
+  deploy:
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    env:
+      REF: ${{ github.event.client_payload.ref }}
+      PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+      TEAM_ID: ${{ secrets.TEAM_ID }}
+      PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+
+    steps:
+      - name: Clone private repo
+        env:
+          PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          git clone --depth 1 --branch "$REF" \
+
+            "https://x-access-token:${PAT}@github.com/${PRIVATE_REPO}.git" source 2>/dev/null
+          echo "✅ Source cloned"
+
+      - name: Report pending status
+        env:
+          PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          cd source
+          SHA=$(git rev-parse HEAD)
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST \
+            -H "Authorization: token ${PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
+            -d "{\"state\":\"pending\",\"target_url\":\"${RUN_URL}\",\"description\":\"Deploy in progress\",\"context\":\"deploy/ci-repo\"}"
+
+      - name: Select Xcode
+        run: |
+          # Prefer Xcode 26 for App Store uploads
+          XCODE_PATH=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE_PATH" ]; then
+            XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          fi
+          echo "Using: $XCODE_PATH"
+          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: source
+        run: xcodegen generate
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: true
+          working-directory: source
+
+      - name: Install Fastlane
+        working-directory: source
+        run: bundle install
+
+      - name: Import certificate
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.CERTIFICATE_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.CERT_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          CERT_PATH=$RUNNER_TEMP/certificate.p12
+          echo "$CERTIFICATE_BASE64" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" \
+            -P "$CERT_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+      - name: Import provisioning profile
+        env:
+          PROFILE_BASE64: ${{ secrets.PROFILE_BASE64 }}
+        run: |
+          PROFILE_PATH=$RUNNER_TEMP/profile.mobileprovision
+          echo "$PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp "$PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/
+
+      - name: Create App Store Connect API key
+        env:
+          ASC_KEY_BASE64: ${{ secrets.ASC_KEY_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        working-directory: source
+        run: |
+          mkdir -p fastlane/keys
+          echo "$ASC_KEY_BASE64" | base64 --decode > "fastlane/keys/AuthKey_${ASC_KEY_ID}.p8"
+
+      - name: Build and upload to TestFlight
+        working-directory: source
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          bundle exec fastlane beta 2>&1 | tee deploy.log > /dev/null
+          echo "✅ Upload to TestFlight complete"
+
+      - name: Report success status
+        if: success()
+        env:
+          PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST \
+            -H "Authorization: token ${PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
+            -d "{\"state\":\"success\",\"target_url\":\"${RUN_URL}\",\"description\":\"Deploy succeeded\",\"context\":\"deploy/ci-repo\"}"
+
+      - name: Report failure status
+        if: failure()
+        env:
+          PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST \
+            -H "Authorization: token ${PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
+            -d "{\"state\":\"failure\",\"target_url\":\"${RUN_URL}\",\"description\":\"Deploy failed\",\"context\":\"deploy/ci-repo\"}"
+
+      - name: Comment on PR (success)
+        if: success() && env.PR_NUMBER != ''
+        env:
+          PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          BODY="✅ **Deploy succeeded** — uploaded to TestFlight\\n\\n[View run](${RUN_URL})"
+
+          curl -s -X POST \
+            -H "Authorization: token ${PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${PRIVATE_REPO}/issues/${PR_NUMBER}/comments" \
+            -d "{\"body\":\"${BODY}\"}" > /dev/null
+
+      - name: Comment on PR (failure)
+        if: failure() && env.PR_NUMBER != ''
+        env:
+          PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          # Grab full deploy log if available
+          LOG_CONTENT=""
+          TRUNCATED=""
+          if [ -f source/deploy.log ]; then
+            LOG_CONTENT=$(cat source/deploy.log | head -c 60000 | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/$/\\n/' | tr -d '\n')
+            if [ "$(wc -c < source/deploy.log)" -gt 60000 ]; then
+              TRUNCATED="\\n\\n⚠️ Log truncated (exceeded 60KB)"
+            fi
+          fi
+
+          DETAILS=""
+          if [ -n "$LOG_CONTENT" ]; then
+            DETAILS="\\n\\n<details><summary>Full deploy log</summary>\\n\\n\`\`\`\\n${LOG_CONTENT}\`\`\`${TRUNCATED}\\n</details>"
+          fi
+
+          BODY="❌ **Deploy to TestFlight failed**${DETAILS}\\n\\n[View run](${RUN_URL})"
+
+          curl -s -X POST \
+            -H "Authorization: token ${PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${PRIVATE_REPO}/issues/${PR_NUMBER}/comments" \
+            -d "{\"body\":\"${BODY}\"}" > /dev/null
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "=============================="
+          echo "📋 Deploy Summary"
+          echo "=============================="
+          echo "PR: #${PR_NUMBER:-n/a}"
+          echo "SHA: ${SHA:0:7}"
+          echo "Status: ${{ job.status }}"
+          echo "=============================="
+
+      - name: Clean up
+        if: always()
+        run: |
+          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true
+          rm -f $RUNNER_TEMP/certificate.p12
+          rm -f $RUNNER_TEMP/profile.mobileprovision
+          rm -rf source

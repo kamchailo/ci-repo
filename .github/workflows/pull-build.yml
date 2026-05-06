@@ -1,0 +1,250 @@
+name: Build & Test (Proxy)
+
+on:
+  repository_dispatch:
+    types: [build]
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    env:
+      REF: ${{ github.event.client_payload.ref }}
+      SHA: ${{ github.event.client_payload.sha }}
+      PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+      PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+      SCHEME: ${{ secrets.SCHEME_NAME }}
+      TEST_TARGET: ${{ secrets.SCHEME_NAME }}Tests
+
+    steps:
+      - name: Clone private repo
+        env:
+          PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          git clone --depth 1 --branch "$REF" \
+            "https://x-access-token:${PAT}@github.com/${PRIVATE_REPO}.git" source 2>/dev/null || {
+            # Branch clone failed — fall back to SHA checkout
+            git clone "https://x-access-token:${PAT}@github.com/${PRIVATE_REPO}.git" source 2>/dev/null
+            cd source
+            git checkout "$SHA" 2>/dev/null
+          }
+          echo "✅ Source cloned"
+
+      - name: Report pending status
+        env:
+          PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST \
+            -H "Authorization: token ${PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
+            -d "{\"state\":\"pending\",\"target_url\":\"${RUN_URL}\",\"description\":\"Build & test in progress\",\"context\":\"ci/ci-repo\"}"
+
+      - name: Select Xcode
+        run: |
+          XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          echo "Using: $XCODE_PATH"
+          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+          xcodebuild -version
+
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: ${{ runner.os }}-deriveddata-${{ hashFiles('source/**/*.swift', 'source/project.yml') }}
+          restore-keys: ${{ runner.os }}-deriveddata-
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: source
+        run: xcodegen generate
+
+      - name: Find simulator
+        id: sim
+        run: |
+          DEST=$(xcrun simctl list devices available -j | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          for runtime, devices in data['devices'].items():
+              for d in devices:
+                  if d['isAvailable'] and 'iPhone' in d['name']:
+                      print(d['udid'])
+                      sys.exit(0)
+          " 2>/dev/null)
+          echo "id=$DEST" >> "$GITHUB_OUTPUT"
+          echo "Using simulator: $DEST"
+
+      - name: Build
+        working-directory: source
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -scheme "$SCHEME" \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}" \
+            -configuration Debug \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee build.log > /dev/null
+          echo "✅ Build succeeded"
+
+      - name: Show build errors on failure
+        if: failure()
+        working-directory: source
+        run: |
+          if [ -f build.log ]; then
+            echo "=== LAST 20 LINES ==="
+            tail -20 build.log
+          fi
+
+      - name: Test
+        working-directory: source
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -scheme "$SCHEME" \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}" \
+            -configuration Debug \
+            -only-testing:"$TEST_TARGET" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            -resultBundlePath TestResults.xcresult \
+            2>&1 | tee test.log > /dev/null
+
+          # Parse test results — handle both Swift Testing and XCTest formats
+          echo ""
+          echo "=== Test Results ==="
+          # Swift Testing format: ✔ Test "name()" passed / ✘ Test "name()" failed
+          grep -E "^[✔✘]" test.log | sed -E \
+            -e 's/^✔ Test "(.+)" passed.*/✅ \1 — PASSED/' \
+            -e 's/^✘ Test "(.+)" failed.*/❌ \1 — FAILED/' \
+            || true
+          # XCTest format fallback
+          grep "Test Case" test.log | sed -E \
+            -e "s/.*Test Case '-\[([^ ]+) ([^]]+)\]' passed.*/✅ \1\/\2 — PASSED/" \
+            -e "s/.*Test Case '-\[([^ ]+) ([^]]+)\]' failed.*/❌ \1\/\2 — FAILED/" \
+            || true
+
+      - name: Show test errors on failure
+        if: failure()
+        working-directory: source
+        run: |
+          if [ -f test.log ]; then
+            echo "=== TEST ERRORS ==="
+            grep -E "error:|failed" test.log | head -50 || true
+            echo "=== LAST 20 LINES ==="
+            tail -20 test.log
+          fi
+
+      - name: Report success status
+        if: success()
+        env:
+          PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST \
+            -H "Authorization: token ${PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
+            -d "{\"state\":\"success\",\"target_url\":\"${RUN_URL}\",\"description\":\"Build & test passed\",\"context\":\"ci/ci-repo\"}"
+
+      - name: Report failure status
+        if: failure()
+        env:
+          PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST \
+            -H "Authorization: token ${PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
+            -d "{\"state\":\"failure\",\"target_url\":\"${RUN_URL}\",\"description\":\"Build or test failed\",\"context\":\"ci/ci-repo\"}"
+
+      - name: Comment on PR (success)
+        if: success() && env.PR_NUMBER != ''
+        env:
+          PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          # Build full test log for collapsible details block
+          LOG_DETAIL=""
+          if [ -f source/test.log ]; then
+            LOG_CONTENT=$(cat source/test.log | head -c 60000 | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/$/\\n/' | tr -d '\n')
+            TRUNCATED=""
+            if [ "$(wc -c < source/test.log)" -gt 60000 ]; then
+              TRUNCATED="\\n\\n⚠️ Log truncated (exceeded 60KB)"
+            fi
+            LOG_DETAIL="\\n\\n<details><summary>Full test log</summary>\\n\\n\`\`\`\\n${LOG_CONTENT}\`\`\`${TRUNCATED}\\n</details>"
+          fi
+
+          BODY="✅ **Build & tests passed**${LOG_DETAIL}\\n\\n[View run](${RUN_URL})"
+
+          curl -s -X POST \
+            -H "Authorization: token ${PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${PRIVATE_REPO}/issues/${PR_NUMBER}/comments" \
+            -d "{\"body\":\"${BODY}\"}" > /dev/null
+
+      - name: Comment on PR (failure)
+        if: failure() && env.PR_NUMBER != ''
+        env:
+          PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          # Grab full log content (test log preferred, fall back to build log)
+          LOG_CONTENT=""
+          if [ -f source/test.log ]; then
+            LOG_CONTENT=$(cat source/test.log | head -c 60000 | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/$/\\n/' | tr -d '\n')
+            TRUNCATED=""
+            if [ "$(wc -c < source/test.log)" -gt 60000 ]; then
+              TRUNCATED="\\n\\n⚠️ Log truncated (exceeded 60KB)"
+            fi
+          elif [ -f source/build.log ]; then
+            LOG_CONTENT=$(cat source/build.log | head -c 60000 | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/$/\\n/' | tr -d '\n')
+            TRUNCATED=""
+            if [ "$(wc -c < source/build.log)" -gt 60000 ]; then
+              TRUNCATED="\\n\\n⚠️ Log truncated (exceeded 60KB)"
+            fi
+          fi
+
+          DETAILS=""
+          if [ -n "$LOG_CONTENT" ]; then
+            DETAILS="\\n\\n<details><summary>Full build/test log</summary>\\n\\n\`\`\`\\n${LOG_CONTENT}\`\`\`${TRUNCATED}\\n</details>"
+          fi
+
+          BODY="❌ **Build or tests failed**${DETAILS}\\n\\n[View run](${RUN_URL})"
+
+          curl -s -X POST \
+            -H "Authorization: token ${PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${PRIVATE_REPO}/issues/${PR_NUMBER}/comments" \
+            -d "{\"body\":\"${BODY}\"}" > /dev/null
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "=============================="
+          echo "📋 Build & Test Summary"
+          echo "=============================="
+          echo "PR: #${PR_NUMBER:-n/a}"
+          echo "SHA: ${SHA:0:7}"
+          if [ -f source/test.log ]; then
+            PASSED=$(grep -c "^✔" source/test.log 2>/dev/null || echo 0)
+            FAILED=$(grep -c "^✘" source/test.log 2>/dev/null || echo 0)
+            echo "Tests: ✅ ${PASSED} passed, ❌ ${FAILED} failed"
+          else
+            echo "Tests: ⚠️ No test log found"
+          fi
+          echo "Status: ${{ job.status }}"
+          echo "=============================="
+
+      - name: Clean up
+        if: always()
+        run: rm -rf source
