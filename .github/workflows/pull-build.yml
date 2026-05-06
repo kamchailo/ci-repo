@@ -47,7 +47,7 @@ jobs:
             -H "Authorization: token ${PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
-            -d "{\"state\":\"pending\",\"target_url\":\"${RUN_URL}\",\"description\":\"Build & test in progress\",\"context\":\"ci/ci-repo\"}" > /dev/null
+            -d "{\"state\":\"pending\",\"target_url\":\"${RUN_URL}\",\"description\":\"Build & test in progress\",\"context\":\"ci/ci-repo\"}" -o /dev/null -w "HTTP Status: %{http_code}\n"
 
       - name: Select Xcode
         run: |
@@ -124,7 +124,7 @@ jobs:
             -H "Authorization: token ${PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
-            -d "{\"state\":\"success\",\"target_url\":\"${RUN_URL}\",\"description\":\"Build & test passed\",\"context\":\"ci/ci-repo\"}" > /dev/null
+            -d "{\"state\":\"success\",\"target_url\":\"${RUN_URL}\",\"description\":\"Build & test passed\",\"context\":\"ci/ci-repo\"}" -o /dev/null -w "HTTP Status: %{http_code}\n"
 
       - name: Report failure status
         if: failure()
@@ -136,7 +136,7 @@ jobs:
             -H "Authorization: token ${PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
-            -d "{\"state\":\"failure\",\"target_url\":\"${RUN_URL}\",\"description\":\"Build or test failed\",\"context\":\"ci/ci-repo\"}" > /dev/null
+            -d "{\"state\":\"failure\",\"target_url\":\"${RUN_URL}\",\"description\":\"Build or test failed\",\"context\":\"ci/ci-repo\"}" -o /dev/null -w "HTTP Status: %{http_code}\n"
 
       - name: Comment on PR (success)
         if: success() && env.PR_NUMBER != ''
@@ -173,7 +173,7 @@ jobs:
             -H "Authorization: token ${PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${PRIVATE_REPO}/issues/${PR_NUMBER}/comments" \
-            -d @$RUNNER_TEMP/comment.json -w "\nHTTP Status: %{http_code}\n"
+            -d @$RUNNER_TEMP/comment.json -o /dev/null -w "HTTP Status: %{http_code}\n"
 
       - name: Comment on PR (failure)
         if: failure() && env.PR_NUMBER != ''
@@ -220,7 +220,7 @@ jobs:
             -H "Authorization: token ${PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${PRIVATE_REPO}/issues/${PR_NUMBER}/comments" \
-            -d @$RUNNER_TEMP/comment.json > /dev/null
+            -d @$RUNNER_TEMP/comment.json -o /dev/null -w "HTTP Status: %{http_code}\n"
 
       - name: Summary
         if: always()
