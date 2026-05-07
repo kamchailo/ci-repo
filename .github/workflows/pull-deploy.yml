@@ -159,6 +159,70 @@ jobs:
           fi
           echo "✅ Upload to TestFlight complete"
 
+      - name: Sanitize deploy error summary
+        if: failure()
+        working-directory: source
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+        run: |
+          if [ ! -f deploy.log ]; then
+            echo "DEPLOY_ERROR_DETAIL=No deploy.log found" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          # Extract only error-relevant lines
+          ERRORS=$(grep -E '\[\!\]|error:|FAILED|fatal|Could not|BUILD FAILED|ARCHIVE FAILED' deploy.log || true)
+
+          if [ -z "$ERRORS" ]; then
+            echo "DEPLOY_ERROR_DETAIL=Build failed but no specific error lines captured" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          # Sanitize pipeline — defense-in-depth
+          SANITIZED=$(echo "$ERRORS" | sed -E \
+            -e 's|/Users/[^ "]*|<path>|g' \
+            -e 's|/private/var/[^ "]*|<path>|g' \
+            -e 's|/var/folders/[^ "]*|<path>|g' \
+            -e 's|[^ ":]*/source/[^ "]*|<path>|g' \
+            -e 's|/Applications/Xcode[^ "]*|<xcode>|g' \
+            -e 's|/[a-zA-Z][a-zA-Z0-9._/-]{4,}/[^ "]*|<path>|g' \
+            -e 's|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|<uuid>|g' \
+            -e 's|(Apple|iPhone) (Development|Distribution): [^")\]]*|\1 \2: <redacted>|g' \
+            -e 's|signingCertificate *= *[^;) ]*|signingCertificate=<redacted>|g' \
+            -e 's|PROVISIONING_PROFILE[^ =]*=[^ ")]*|PROVISIONING_PROFILE=<redacted>|g' \
+            -e 's|DEVELOPMENT_TEAM *= *[^ ")]*|DEVELOPMENT_TEAM=<redacted>|g' \
+          )
+
+          # Belt-and-braces: redact actual secret values if they leaked
+          if [ -n "$ASC_KEY_ID" ]; then
+            SANITIZED=$(echo "$SANITIZED" | sed "s|${ASC_KEY_ID}|<asc-key>|g")
+          fi
+          if [ -n "$ASC_ISSUER_ID" ]; then
+            SANITIZED=$(echo "$SANITIZED" | sed "s|${ASC_ISSUER_ID}|<asc-issuer>|g")
+          fi
+          if [ -n "$TEAM_ID" ]; then
+            SANITIZED=$(echo "$SANITIZED" | sed "s|${TEAM_ID}|<team-id>|g")
+          fi
+
+          # Strip backticks (break markdown injection)
+          SANITIZED=$(echo "$SANITIZED" | tr '`' "'")
+
+          # Cap at 60 lines / 4096 bytes
+          SANITIZED=$(echo "$SANITIZED" | head -60 | head -c 4096)
+
+          # Prevent heredoc delimiter injection (attacker-controlled build errors could
+          # contain the literal delimiter, terminating heredoc and injecting into GITHUB_ENV)
+          SANITIZED=$(printf '%s' "$SANITIZED" | sed 's/__SANITIZED_EOF__/[REDACTED]/g')
+
+          {
+            echo "DEPLOY_ERROR_DETAIL<<__SANITIZED_EOF__"
+            printf '%s' "$SANITIZED"
+            echo
+            echo "__SANITIZED_EOF__"
+          } >> "$GITHUB_ENV"
+
       - name: Extract build info
         if: always()
         working-directory: source
@@ -272,6 +336,18 @@ jobs:
           🕐 **Attempted:** ${DEPLOY_TS}
           💥 **Error:** ${DEPLOY_ERROR:-No error details captured}
           🔗 [View CI run](${RUN_URL})"
+
+            if [ -n "$DEPLOY_ERROR_DETAIL" ]; then
+              BODY="${BODY}
+
+          <details><summary>Sanitized error detail</summary>
+
+          \`\`\`
+          ${DEPLOY_ERROR_DETAIL}
+          \`\`\`
+
+          </details>"
+            fi
           fi
 
           jq -n --arg body "$BODY" '{"body": $body}' > $RUNNER_TEMP/deploy-comment.json
@@ -315,6 +391,18 @@ jobs:
           🕐 **Attempted:** ${DEPLOY_TS}
           💥 **Error:** ${DEPLOY_ERROR:-No error details captured}
           🔗 [View CI run](${RUN_URL})"
+
+          if [ -n "$DEPLOY_ERROR_DETAIL" ]; then
+            COMMENT_TEXT="${COMMENT_TEXT}
+
+          <details><summary>Sanitized error detail</summary>
+
+          \`\`\`
+          ${DEPLOY_ERROR_DETAIL}
+          \`\`\`
+
+          </details>"
+          fi
 
           jq -n --arg body "$COMMENT_TEXT" '{"body": $body}' > $RUNNER_TEMP/comment.json
 

@@ -141,6 +141,77 @@ jobs:
             -resultBundlePath TestResults.xcresult \
             2>&1 | tee test.log > /dev/null
 
+      - name: Sanitize build/test log
+        if: always()
+        working-directory: source
+        env:
+          SCHEME: ${{ secrets.SCHEME_NAME }}
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+        run: |
+          LOG_FILE=""
+          if [ -f test.log ]; then
+            LOG_FILE="test.log"
+          elif [ -f build.log ]; then
+            LOG_FILE="build.log"
+          fi
+
+          if [ -z "$LOG_FILE" ]; then
+            echo "SANITIZED_LOG=No log file found" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          if [ "${{ job.status }}" = "success" ]; then
+            # Success: keep test results summary lines
+            EXTRACTED=$(grep -E 'Test Suite|Test Case|passed|failed|Executed|error:|FAILED|Build complete|BUILD SUCCEEDED' "$LOG_FILE" || true)
+          else
+            # Failure: error lines only
+            EXTRACTED=$(grep -E '\[\!\]|error:|FAILED|fatal|Could not|BUILD FAILED|ARCHIVE FAILED|undefined symbol|linker|cannot find' "$LOG_FILE" || true)
+          fi
+
+          if [ -z "$EXTRACTED" ]; then
+            EXTRACTED="(no matching log lines captured)"
+          fi
+
+          # Sanitize pipeline — defense-in-depth
+          SANITIZED=$(echo "$EXTRACTED" | sed -E \
+            -e 's|/Users/[^ "]*|<path>|g' \
+            -e 's|/private/var/[^ "]*|<path>|g' \
+            -e 's|/var/folders/[^ "]*|<path>|g' \
+            -e 's|[^ ":]*/source/[^ "]*|<path>|g' \
+            -e 's|/Applications/Xcode[^ "]*|<xcode>|g' \
+            -e 's|/[a-zA-Z][a-zA-Z0-9._/-]{4,}/[^ "]*|<path>|g' \
+            -e 's|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|<uuid>|g' \
+            -e 's|(Apple|iPhone) (Development|Distribution): [^")\]]*|\1 \2: <redacted>|g' \
+            -e 's|signingCertificate *= *[^;) ]*|signingCertificate=<redacted>|g' \
+            -e 's|PROVISIONING_PROFILE[^ =]*=[^ ")]*|PROVISIONING_PROFILE=<redacted>|g' \
+            -e 's|DEVELOPMENT_TEAM *= *[^ ")]*|DEVELOPMENT_TEAM=<redacted>|g' \
+          )
+
+          # Strip backticks (break markdown injection)
+          SANITIZED=$(echo "$SANITIZED" | tr '`' "'")
+
+          # Belt-and-braces: redact actual secret values if they leaked
+          if [ -n "$SCHEME" ]; then
+            SANITIZED=$(printf '%s' "$SANITIZED" | sed "s|${SCHEME}|[SCHEME]|g")
+          fi
+          if [ -n "$TEAM_ID" ]; then
+            SANITIZED=$(printf '%s' "$SANITIZED" | sed "s|${TEAM_ID}|<team-id>|g")
+          fi
+
+          # Cap at 60 lines / 8192 bytes
+          SANITIZED=$(echo "$SANITIZED" | head -60 | head -c 8192)
+
+          # Prevent heredoc delimiter injection (attacker-controlled build errors could
+          # contain the literal delimiter, terminating heredoc and injecting into GITHUB_ENV)
+          SANITIZED=$(printf '%s' "$SANITIZED" | sed 's/__SANITIZED_EOF__/[REDACTED]/g')
+
+          {
+            echo "SANITIZED_LOG<<__SANITIZED_EOF__"
+            printf '%s' "$SANITIZED"
+            echo
+            echo "__SANITIZED_EOF__"
+          } >> "$GITHUB_ENV"
+
       - name: Report success status
         if: success()
         env:
@@ -173,21 +244,15 @@ jobs:
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
           COMMENT_TEXT="✅ **Build & tests passed**"
-          if [ -f source/test.log ]; then
-            LOG_CONTENT=$(head -c 60000 source/test.log)
+          if [ -n "$SANITIZED_LOG" ]; then
             COMMENT_TEXT="${COMMENT_TEXT}
 
-          <details><summary>Full test log</summary>
+          <details><summary>Test summary</summary>
 
           \`\`\`
-          ${LOG_CONTENT}
-          \`\`\`"
-            if [ "$(wc -c < source/test.log)" -gt 60000 ]; then
-              COMMENT_TEXT="${COMMENT_TEXT}
+          ${SANITIZED_LOG}
+          \`\`\`
 
-          ⚠️ Log truncated (exceeded 60KB)"
-            fi
-            COMMENT_TEXT="${COMMENT_TEXT}
           </details>"
           fi
           COMMENT_TEXT="${COMMENT_TEXT}
@@ -209,32 +274,16 @@ jobs:
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          # Grab full log content (test log preferred, fall back to build log)
           COMMENT_TEXT="❌ **Build or tests failed**"
-          LOG_FILE=""
-          if [ -f source/test.log ]; then
-            LOG_FILE="source/test.log"
-            LOG_LABEL="Full build/test log"
-          elif [ -f source/build.log ]; then
-            LOG_FILE="source/build.log"
-            LOG_LABEL="Full build/test log"
-          fi
-
-          if [ -n "$LOG_FILE" ]; then
-            LOG_CONTENT=$(head -c 60000 "$LOG_FILE")
+          if [ -n "$SANITIZED_LOG" ]; then
             COMMENT_TEXT="${COMMENT_TEXT}
 
-          <details><summary>${LOG_LABEL}</summary>
+          <details><summary>Sanitized error detail</summary>
 
           \`\`\`
-          ${LOG_CONTENT}
-          \`\`\`"
-            if [ "$(wc -c < "$LOG_FILE")" -gt 60000 ]; then
-              COMMENT_TEXT="${COMMENT_TEXT}
+          ${SANITIZED_LOG}
+          \`\`\`
 
-          ⚠️ Log truncated (exceeded 60KB)"
-            fi
-            COMMENT_TEXT="${COMMENT_TEXT}
           </details>"
           fi
           COMMENT_TEXT="${COMMENT_TEXT}
