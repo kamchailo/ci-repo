@@ -11,19 +11,46 @@ jobs:
     timeout-minutes: 30
 
     env:
-      REF: ${{ github.event.client_payload.ref }}
-      SHA: ${{ github.event.client_payload.sha }}
-      PR_NUMBER: ${{ github.event.client_payload.pr_number }}
       PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
       SCHEME: ${{ secrets.SCHEME_NAME }}
       TEST_TARGET: ${{ secrets.SCHEME_NAME }}Tests
 
     steps:
-      - name: Mask sensitive values
+      - name: Resolve job manifest
+        id: manifest
+        env:
+          PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+          JOB_ID: ${{ github.event.client_payload.job_id }}
         run: |
-          echo "::add-mask::${REF}"
-          echo "::add-mask::${SHA}"
-          echo "::add-mask::${PR_NUMBER}"
+          if [ -z "$JOB_ID" ]; then
+            echo "❌ No job_id in client_payload"
+            exit 1
+          fi
+
+          # Fetch manifest from private repo ci-jobs branch
+          RESPONSE=$(curl -sf \
+            -H "Authorization: token ${PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${PRIVATE_REPO}/contents/.ci-jobs/${JOB_ID}.json?ref=ci-jobs")
+
+          # Decode manifest content (base64 with possible newlines)
+          MANIFEST=$(echo "$RESPONSE" | jq -r '.content' | base64 -d)
+
+          REF=$(echo "$MANIFEST" | jq -r '.ref')
+          SHA=$(echo "$MANIFEST" | jq -r '.sha')
+          PR_NUMBER=$(echo "$MANIFEST" | jq -r '.pr_number')
+
+          # Mask all sensitive values
+          echo "::add-mask::$REF"
+          echo "::add-mask::$SHA"
+          if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
+            echo "::add-mask::$PR_NUMBER"
+          fi
+
+          # Export to env for subsequent steps
+          echo "REF=$REF" >> "$GITHUB_ENV"
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+          echo "PR_NUMBER=$PR_NUMBER" >> "$GITHUB_ENV"
 
       - name: Clone private repo
         env:
@@ -34,7 +61,7 @@ jobs:
             # Branch clone failed — fall back to SHA checkout
             git clone "https://x-access-token:${PAT}@github.com/${PRIVATE_REPO}.git" source 2>/dev/null
             cd source
-            git checkout "$SHA" 2>/dev/null
+            git checkout "$SHA" > /dev/null 2>&1
           }
           echo "✅ Source cloned"
 
@@ -68,7 +95,7 @@ jobs:
 
       - name: Generate Xcode project
         working-directory: source
-        run: xcodegen generate
+        run: xcodegen generate > /dev/null 2>&1
 
       - name: Find simulator
         id: sim
@@ -228,15 +255,6 @@ jobs:
           echo "=============================="
           echo "📋 Build & Test Summary"
           echo "=============================="
-          echo "PR: #${PR_NUMBER:-n/a}"
-          echo "SHA: ${SHA:0:7}"
-          if [ -f source/test.log ]; then
-            PASSED=$(grep -c "^✔" source/test.log 2>/dev/null || echo 0)
-            FAILED=$(grep -c "^✘" source/test.log 2>/dev/null || echo 0)
-            echo "Tests: ✅ ${PASSED} passed, ❌ ${FAILED} failed"
-          else
-            echo "Tests: ⚠️ No test log found"
-          fi
           echo "Status: ${{ job.status }}"
           echo "=============================="
 

@@ -11,16 +11,42 @@ jobs:
     timeout-minutes: 45
 
     env:
-      REF: ${{ github.event.client_payload.ref }}
-      PR_NUMBER: ${{ github.event.client_payload.pr_number }}
       TEAM_ID: ${{ secrets.TEAM_ID }}
       PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
 
     steps:
-      - name: Mask sensitive values
+      - name: Resolve job manifest
+        id: manifest
+        env:
+          PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+          JOB_ID: ${{ github.event.client_payload.job_id }}
         run: |
-          echo "::add-mask::${REF}"
-          echo "::add-mask::${PR_NUMBER}"
+          if [ -z "$JOB_ID" ]; then
+            echo "❌ No job_id in client_payload"
+            exit 1
+          fi
+
+          # Fetch manifest from private repo ci-jobs branch
+          RESPONSE=$(curl -sf \
+            -H "Authorization: token ${PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${PRIVATE_REPO}/contents/.ci-jobs/${JOB_ID}.json?ref=ci-jobs")
+
+          # Decode manifest content (base64 with possible newlines)
+          MANIFEST=$(echo "$RESPONSE" | jq -r '.content' | base64 -d)
+
+          REF=$(echo "$MANIFEST" | jq -r '.ref')
+          PR_NUMBER=$(echo "$MANIFEST" | jq -r '.pr_number // empty')
+
+          # Mask all sensitive values
+          echo "::add-mask::$REF"
+          if [ -n "$PR_NUMBER" ]; then
+            echo "::add-mask::$PR_NUMBER"
+          fi
+
+          # Export to env for subsequent steps
+          echo "REF=$REF" >> "$GITHUB_ENV"
+          echo "PR_NUMBER=$PR_NUMBER" >> "$GITHUB_ENV"
 
       - name: Clone private repo
         env:
@@ -37,6 +63,7 @@ jobs:
           cd source
           SHA=$(git rev-parse HEAD)
           echo "SHA=$SHA" >> "$GITHUB_ENV"
+          echo "::add-mask::$SHA"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           curl -s -X POST \
             -H "Authorization: token ${PAT}" \
@@ -60,7 +87,7 @@ jobs:
 
       - name: Generate Xcode project
         working-directory: source
-        run: xcodegen generate
+        run: xcodegen generate > /dev/null 2>&1
 
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
@@ -71,7 +98,7 @@ jobs:
 
       - name: Install Fastlane
         working-directory: source
-        run: bundle install
+        run: bundle install --quiet > /dev/null 2>&1
 
       - name: Import certificate
         env:
@@ -80,19 +107,19 @@ jobs:
         run: |
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
           KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null 2>&1
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH" > /dev/null 2>&1
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null 2>&1
 
           CERT_PATH=$RUNNER_TEMP/certificate.p12
           echo "$CERTIFICATE_BASE64" | base64 --decode > "$CERT_PATH"
           security import "$CERT_PATH" \
             -P "$CERT_PASSWORD" \
             -A -t cert -f pkcs12 \
-            -k "$KEYCHAIN_PATH"
+            -k "$KEYCHAIN_PATH" > /dev/null 2>&1
           security set-key-partition-list -S apple-tool:,apple: \
-            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null 2>&1
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db > /dev/null 2>&1
 
       - name: Import provisioning profile
         env:
@@ -101,7 +128,7 @@ jobs:
           PROFILE_PATH=$RUNNER_TEMP/profile.mobileprovision
           echo "$PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          cp "$PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/
+          cp "$PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/ > /dev/null 2>&1
 
       - name: Create App Store Connect API key
         env:
@@ -118,25 +145,75 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
+          set -o pipefail
           bundle exec fastlane beta 2>&1 | tee deploy.log > /dev/null
+          FASTLANE_EXIT=${PIPESTATUS[0]}
+          if [ $FASTLANE_EXIT -ne 0 ]; then
+            echo "❌ Fastlane exited with code $FASTLANE_EXIT"
+            exit $FASTLANE_EXIT
+          fi
+          # Verify fastlane actually started the beta lane
+          if [ -f deploy.log ] && ! grep -q 'Driving the lane' deploy.log; then
+            echo "❌ Fastlane did not start the beta lane — deploy.log may be incomplete"
+            exit 1
+          fi
           echo "✅ Upload to TestFlight complete"
 
       - name: Extract build info
         if: always()
         working-directory: source
         run: |
+          BUILD_NUM="unknown"
+          VERSION="unknown"
+          APP_NAME="App"
+          DEPLOY_TS=$(date -u '+%Y-%m-%d %H:%M UTC')
+
           if [ -f deploy.log ]; then
-            BUILD_NUM=$(grep -oP 'Build\s+#?\K\d+|build_number.*?(\d+)' deploy.log | tail -1 || true)
-            if [ -z "$BUILD_NUM" ]; then
-              BUILD_NUM=$(grep -oP 'Successfully uploaded.*?build.*?(\d+)' deploy.log | grep -oP '\d+' | tail -1 || true)
-            fi
-            if [ -z "$BUILD_NUM" ]; then
-              BUILD_NUM="unknown"
-            fi
-            echo "BUILD_NUM=$BUILD_NUM" >> "$GITHUB_ENV"
-          else
-            echo "BUILD_NUM=unknown" >> "$GITHUB_ENV"
+            # Build number — fastlane logs "Incrementing build number to N" or "build_number: N"
+            for pattern in \
+              'Incrementing build number to [0-9]' \
+              'build_number.*[0-9]' \
+              'CFBundleVersion.*[0-9]' \
+              'Setting.*build.*number.*[0-9]'; do
+              val=$(grep -i "$pattern" deploy.log | grep -o '[0-9][0-9]*' | tail -1 || true)
+              if [ -n "$val" ]; then BUILD_NUM="$val"; break; fi
+            done
+
+            # Version — from CFBundleShortVersionString or IPA filename
+            for pattern in \
+              'CFBundleShortVersionString' \
+              'ShortVersionString' \
+              '\.ipa'; do
+              val=$(grep -i "$pattern" deploy.log | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)
+              if [ -n "$val" ]; then VERSION="$val"; break; fi
+            done
+
+            # App name — from exported IPA path (sanitized: name only, no path)
+            ipa_name=$(grep -oE '[A-Za-z0-9_-]+\.ipa' deploy.log | head -1 | sed 's/\.ipa//' || true)
+            if [ -n "$ipa_name" ]; then APP_NAME="$ipa_name"; fi
           fi
+
+          # Error extraction for failure diagnostics
+          DEPLOY_ERROR=""
+          if [ -f deploy.log ]; then
+            # First try fastlane's own failure markers
+            DEPLOY_ERROR=$(grep -E '^\[\!\]|fastlane finished with errors|\*\* (BUILD|ARCHIVE) FAILED \*\*' deploy.log | tail -1 | sed 's|/[^ ]*source/||g; s|/Users/[^ ]*/||g' | cut -c1-200 || true)
+            # Fall back to generic error grep only if fastlane markers not found
+            if [ -z "$DEPLOY_ERROR" ]; then
+              DEPLOY_ERROR=$(grep -i 'error\|fatal\|failed\|Could not' deploy.log | grep -v '^\s*$' | tail -1 | sed 's|/[^ ]*source/||g; s|/Users/[^ ]*/||g' | cut -c1-200 || true)
+            fi
+          fi
+
+          echo "BUILD_NUM=$BUILD_NUM" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "APP_NAME=$APP_NAME" >> "$GITHUB_ENV"
+          echo "DEPLOY_TS=$DEPLOY_TS" >> "$GITHUB_ENV"
+          {
+            echo "DEPLOY_ERROR<<__EOF__"
+            printf '%s' "$DEPLOY_ERROR"
+            echo
+            echo "__EOF__"
+          } >> "$GITHUB_ENV"
 
       - name: Report success status
         if: success()
@@ -144,12 +221,18 @@ jobs:
           PAT: ${{ secrets.PRIVATE_REPO_PAT }}
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          DESC="Deploy succeeded — Build #${BUILD_NUM}"
+          DESC="Deploy succeeded — v${VERSION} (${BUILD_NUM})"
+          PAYLOAD=$(jq -n \
+            --arg state "success" \
+            --arg url "$RUN_URL" \
+            --arg desc "$DESC" \
+            --arg ctx "deploy/ci-repo" \
+            '{state:$state, target_url:$url, description:$desc, context:$ctx}')
           curl -s -X POST \
             -H "Authorization: token ${PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
-            -d "{\"state\":\"success\",\"target_url\":\"${RUN_URL}\",\"description\":\"${DESC}\",\"context\":\"deploy/ci-repo\"}" -o /dev/null -w "HTTP Status: %{http_code}\n"
+            -d "$PAYLOAD" -o /dev/null -w "HTTP Status: %{http_code}\n"
 
       - name: Report failure status
         if: failure()
@@ -157,11 +240,18 @@ jobs:
           PAT: ${{ secrets.PRIVATE_REPO_PAT }}
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          DESC="Deploy failed — ${DEPLOY_ERROR:0:80}"
+          PAYLOAD=$(jq -n \
+            --arg state "failure" \
+            --arg url "$RUN_URL" \
+            --arg desc "${DESC:-Deploy failed}" \
+            --arg ctx "deploy/ci-repo" \
+            '{state:$state, target_url:$url, description:$desc, context:$ctx}')
           curl -s -X POST \
             -H "Authorization: token ${PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
-            -d "{\"state\":\"failure\",\"target_url\":\"${RUN_URL}\",\"description\":\"Deploy failed\",\"context\":\"deploy/ci-repo\"}" -o /dev/null -w "HTTP Status: %{http_code}\n"
+            -d "$PAYLOAD" -o /dev/null -w "HTTP Status: %{http_code}\n"
 
       - name: Comment deploy result on commit
         if: always()
@@ -171,13 +261,17 @@ jobs:
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
           if [ "${{ job.status }}" = "success" ]; then
-            BODY="✅ **Deploy succeeded** — Build #${BUILD_NUM} uploaded to TestFlight
+            BODY="✅ **Deploy succeeded** — \`${APP_NAME}\` v${VERSION} (${BUILD_NUM}) uploaded to TestFlight
 
-          [View run](${RUN_URL})"
+          📦 **Version:** ${VERSION} | **Build:** ${BUILD_NUM}
+          🕐 **Deployed:** ${DEPLOY_TS}
+          🔗 [View CI run](${RUN_URL})"
           else
             BODY="❌ **Deploy to TestFlight failed**
 
-          [View run](${RUN_URL})"
+          🕐 **Attempted:** ${DEPLOY_TS}
+          💥 **Error:** ${DEPLOY_ERROR:-No error details captured}
+          🔗 [View CI run](${RUN_URL})"
           fi
 
           jq -n --arg body "$BODY" '{"body": $body}' > $RUNNER_TEMP/deploy-comment.json
@@ -195,9 +289,11 @@ jobs:
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          COMMENT_TEXT="✅ **Deploy succeeded** — Build #${BUILD_NUM} uploaded to TestFlight
+          COMMENT_TEXT="✅ **Deploy succeeded** — \`${APP_NAME}\` v${VERSION} (${BUILD_NUM}) uploaded to TestFlight
 
-          [View run](${RUN_URL})"
+          📦 **Version:** ${VERSION} | **Build:** ${BUILD_NUM}
+          🕐 **Deployed:** ${DEPLOY_TS}
+          🔗 [View CI run](${RUN_URL})"
 
           jq -n --arg body "$COMMENT_TEXT" '{"body": $body}' > $RUNNER_TEMP/comment.json
 
@@ -216,7 +312,9 @@ jobs:
 
           COMMENT_TEXT="❌ **Deploy to TestFlight failed**
 
-          [View run](${RUN_URL})"
+          🕐 **Attempted:** ${DEPLOY_TS}
+          💥 **Error:** ${DEPLOY_ERROR:-No error details captured}
+          🔗 [View CI run](${RUN_URL})"
 
           jq -n --arg body "$COMMENT_TEXT" '{"body": $body}' > $RUNNER_TEMP/comment.json
 
@@ -232,9 +330,8 @@ jobs:
           echo "=============================="
           echo "📋 Deploy Summary"
           echo "=============================="
-          echo "PR: #${PR_NUMBER:-n/a}"
-          echo "SHA: ${SHA:0:7}"
           echo "Build: #${BUILD_NUM:-unknown}"
+          echo "Deployed: ${DEPLOY_TS:-n/a}"
           echo "Status: ${{ job.status }}"
           echo "=============================="
 
