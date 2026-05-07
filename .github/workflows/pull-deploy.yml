@@ -121,17 +121,35 @@ jobs:
           bundle exec fastlane beta 2>&1 | tee deploy.log > /dev/null
           echo "✅ Upload to TestFlight complete"
 
+      - name: Extract build info
+        if: always()
+        working-directory: source
+        run: |
+          if [ -f deploy.log ]; then
+            BUILD_NUM=$(grep -oP 'Build\s+#?\K\d+|build_number.*?(\d+)' deploy.log | tail -1 || true)
+            if [ -z "$BUILD_NUM" ]; then
+              BUILD_NUM=$(grep -oP 'Successfully uploaded.*?build.*?(\d+)' deploy.log | grep -oP '\d+' | tail -1 || true)
+            fi
+            if [ -z "$BUILD_NUM" ]; then
+              BUILD_NUM="unknown"
+            fi
+            echo "BUILD_NUM=$BUILD_NUM" >> "$GITHUB_ENV"
+          else
+            echo "BUILD_NUM=unknown" >> "$GITHUB_ENV"
+          fi
+
       - name: Report success status
         if: success()
         env:
           PAT: ${{ secrets.PRIVATE_REPO_PAT }}
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          DESC="Deploy succeeded — Build #${BUILD_NUM}"
           curl -s -X POST \
             -H "Authorization: token ${PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
-            -d "{\"state\":\"success\",\"target_url\":\"${RUN_URL}\",\"description\":\"Deploy succeeded\",\"context\":\"deploy/ci-repo\"}" -o /dev/null -w "HTTP Status: %{http_code}\n"
+            -d "{\"state\":\"success\",\"target_url\":\"${RUN_URL}\",\"description\":\"${DESC}\",\"context\":\"deploy/ci-repo\"}" -o /dev/null -w "HTTP Status: %{http_code}\n"
 
       - name: Report failure status
         if: failure()
@@ -145,6 +163,31 @@ jobs:
             "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
             -d "{\"state\":\"failure\",\"target_url\":\"${RUN_URL}\",\"description\":\"Deploy failed\",\"context\":\"deploy/ci-repo\"}" -o /dev/null -w "HTTP Status: %{http_code}\n"
 
+      - name: Comment deploy result on commit
+        if: always()
+        env:
+          PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          if [ "${{ job.status }}" = "success" ]; then
+            BODY="✅ **Deploy succeeded** — Build #${BUILD_NUM} uploaded to TestFlight
+
+          [View run](${RUN_URL})"
+          else
+            BODY="❌ **Deploy to TestFlight failed**
+
+          [View run](${RUN_URL})"
+          fi
+
+          jq -n --arg body "$BODY" '{"body": $body}' > $RUNNER_TEMP/deploy-comment.json
+
+          curl -s -X POST \
+            -H "Authorization: token ${PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${PRIVATE_REPO}/commits/${SHA}/comments" \
+            -d @$RUNNER_TEMP/deploy-comment.json -o /dev/null -w "HTTP Status: %{http_code}\n"
+
       - name: Comment on PR (success)
         if: success() && env.PR_NUMBER != ''
         env:
@@ -152,7 +195,7 @@ jobs:
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          COMMENT_TEXT="✅ **Deploy succeeded** — uploaded to TestFlight
+          COMMENT_TEXT="✅ **Deploy succeeded** — Build #${BUILD_NUM} uploaded to TestFlight
 
           [View run](${RUN_URL})"
 
@@ -210,6 +253,7 @@ jobs:
           echo "=============================="
           echo "PR: #${PR_NUMBER:-n/a}"
           echo "SHA: ${SHA:0:7}"
+          echo "Build: #${BUILD_NUM:-unknown}"
           echo "Status: ${{ job.status }}"
           echo "=============================="
 
@@ -221,3 +265,4 @@ jobs:
           rm -f $RUNNER_TEMP/profile.mobileprovision
           rm -rf source
           rm -f $RUNNER_TEMP/comment.json
+          rm -f $RUNNER_TEMP/deploy-comment.json
