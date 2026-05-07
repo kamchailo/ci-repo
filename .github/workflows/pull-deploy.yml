@@ -182,28 +182,28 @@ jobs:
 
           # Sanitize pipeline — defense-in-depth
           SANITIZED=$(echo "$ERRORS" | sed -E \
-            -e 's|/Users/[^ "]*|<path>|g' \
-            -e 's|/private/var/[^ "]*|<path>|g' \
-            -e 's|/var/folders/[^ "]*|<path>|g' \
-            -e 's|[^ ":]*/source/[^ "]*|<path>|g' \
-            -e 's|/Applications/Xcode[^ "]*|<xcode>|g' \
-            -e 's|/[a-zA-Z][a-zA-Z0-9._/-]{4,}/[^ "]*|<path>|g' \
-            -e 's|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|<uuid>|g' \
-            -e 's|(Apple|iPhone) (Development|Distribution): [^")\]]*|\1 \2: <redacted>|g' \
-            -e 's|signingCertificate *= *[^;) ]*|signingCertificate=<redacted>|g' \
-            -e 's|PROVISIONING_PROFILE[^ =]*=[^ ")]*|PROVISIONING_PROFILE=<redacted>|g' \
-            -e 's|DEVELOPMENT_TEAM *= *[^ ")]*|DEVELOPMENT_TEAM=<redacted>|g' \
+            -e 's#/Users/[^ "]*#<path>#g' \
+            -e 's#/private/var/[^ "]*#<path>#g' \
+            -e 's#/var/folders/[^ "]*#<path>#g' \
+            -e 's#[^ ":]*/source/[^ "]*#<path>#g' \
+            -e 's#/Applications/Xcode[^ "]*#<xcode>#g' \
+            -e 's#/[a-zA-Z][a-zA-Z0-9._/-]{4,}/[^ "]*#<path>#g' \
+            -e 's#[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}#<uuid>#g' \
+            -e 's#(Apple|iPhone) (Development|Distribution): [^]")]*#\1 \2: <redacted>#g' \
+            -e 's#signingCertificate *= *[^;) ]*#signingCertificate=<redacted>#g' \
+            -e 's#PROVISIONING_PROFILE[^ =]*=[^ ")]*#PROVISIONING_PROFILE=<redacted>#g' \
+            -e 's#DEVELOPMENT_TEAM *= *[^ ")]*#DEVELOPMENT_TEAM=<redacted>#g' \
           )
 
           # Belt-and-braces: redact actual secret values if they leaked
           if [ -n "$ASC_KEY_ID" ]; then
-            SANITIZED=$(echo "$SANITIZED" | sed "s|${ASC_KEY_ID}|<asc-key>|g")
+            SANITIZED="${SANITIZED//$ASC_KEY_ID/<asc-key>}"
           fi
           if [ -n "$ASC_ISSUER_ID" ]; then
-            SANITIZED=$(echo "$SANITIZED" | sed "s|${ASC_ISSUER_ID}|<asc-issuer>|g")
+            SANITIZED="${SANITIZED//$ASC_ISSUER_ID/<asc-issuer>}"
           fi
           if [ -n "$TEAM_ID" ]; then
-            SANITIZED=$(echo "$SANITIZED" | sed "s|${TEAM_ID}|<team-id>|g")
+            SANITIZED="${SANITIZED//$TEAM_ID/<team-id>}"
           fi
 
           # Strip backticks (break markdown injection)
