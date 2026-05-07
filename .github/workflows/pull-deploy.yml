@@ -214,26 +214,7 @@ jobs:
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          # Grab full deploy log if available
-          COMMENT_TEXT="❌ **Deploy to TestFlight failed**"
-          if [ -f source/deploy.log ]; then
-            LOG_CONTENT=$(head -c 60000 source/deploy.log)
-            COMMENT_TEXT="${COMMENT_TEXT}
-
-          <details><summary>Full deploy log</summary>
-
-          \`\`\`
-          ${LOG_CONTENT}
-          \`\`\`"
-            if [ "$(wc -c < source/deploy.log)" -gt 60000 ]; then
-              COMMENT_TEXT="${COMMENT_TEXT}
-
-          ⚠️ Log truncated (exceeded 60KB)"
-            fi
-            COMMENT_TEXT="${COMMENT_TEXT}
-          </details>"
-          fi
-          COMMENT_TEXT="${COMMENT_TEXT}
+          COMMENT_TEXT="❌ **Deploy to TestFlight failed**
 
           [View run](${RUN_URL})"
 
