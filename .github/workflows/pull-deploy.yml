@@ -140,6 +140,32 @@ jobs:
           echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
           echo "✅ Profile installed (UUID masked)"
 
+      - name: Generate ExportOptions.plist
+        working-directory: source
+        run: |
+          cat > ExportOptions.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>method</key>
+  <string>app-store</string>
+  <key>teamID</key>
+  <string>${TEAM_ID}</string>
+  <key>signingStyle</key>
+  <string>manual</string>
+  <key>signingCertificate</key>
+  <string>Apple Distribution</string>
+  <key>provisioningProfiles</key>
+  <dict>
+    <key>com.creatiogames.bansheebahn</key>
+    <string>${PROFILE_NAME}</string>
+  </dict>
+</dict>
+</plist>
+EOF
+          echo "✅ ExportOptions.plist generated"
+
       - name: Create App Store Connect API key
         env:
           ASC_KEY_BASE64: ${{ secrets.ASC_KEY_BASE64 }}
@@ -158,6 +184,7 @@ jobs:
           set -o pipefail
           # Backslash-space in CODE_SIGN_IDENTITY survives double quotes; xcodebuild interprets it
           export GYM_XCARGS="PROVISIONING_PROFILE=${PROFILE_UUID} CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=Apple\ Distribution DEVELOPMENT_TEAM=${TEAM_ID}"
+          export GYM_EXPORT_OPTIONS_PLIST="$(pwd)/ExportOptions.plist"
           bundle exec fastlane beta 2>&1 | tee deploy.log > /dev/null
           FASTLANE_EXIT=${PIPESTATUS[0]}
           if [ $FASTLANE_EXIT -ne 0 ]; then
@@ -441,6 +468,7 @@ jobs:
           security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true
           rm -f $RUNNER_TEMP/certificate.p12
           rm -f $RUNNER_TEMP/profile.mobileprovision
+          rm -f source/ExportOptions.plist
           rm -rf source
           rm -f $RUNNER_TEMP/comment.json
           rm -f $RUNNER_TEMP/deploy-comment.json
