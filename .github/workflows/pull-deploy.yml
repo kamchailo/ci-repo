@@ -128,7 +128,17 @@ jobs:
           PROFILE_PATH=$RUNNER_TEMP/profile.mobileprovision
           echo "$PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          cp "$PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/ > /dev/null 2>&1
+          # Extract UUID and Name from profile (Xcode requires <UUID>.mobileprovision)
+          PROFILE_PLIST=$(security cms -D -i "$PROFILE_PATH") || { echo "❌ Failed to decode provisioning profile"; exit 1; }
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< "$PROFILE_PLIST")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print Name" /dev/stdin <<< "$PROFILE_PLIST")
+          if [ -z "$PROFILE_UUID" ]; then echo "❌ Could not extract UUID from profile"; exit 1; fi
+          cp "$PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/"${PROFILE_UUID}.mobileprovision" > /dev/null 2>&1
+          echo "::add-mask::$PROFILE_UUID"
+          echo "::add-mask::$PROFILE_NAME"
+          echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
+          echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
+          echo "✅ Profile installed (UUID masked)"
 
       - name: Create App Store Connect API key
         env:
@@ -146,6 +156,8 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
           set -o pipefail
+          # Backslash-space in CODE_SIGN_IDENTITY survives double quotes; xcodebuild interprets it
+          export GYM_XCARGS="PROVISIONING_PROFILE=${PROFILE_UUID} CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=Apple\ Distribution DEVELOPMENT_TEAM=${TEAM_ID}"
           bundle exec fastlane beta 2>&1 | tee deploy.log > /dev/null
           FASTLANE_EXIT=${PIPESTATUS[0]}
           if [ $FASTLANE_EXIT -ne 0 ]; then
