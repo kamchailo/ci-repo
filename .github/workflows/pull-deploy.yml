@@ -229,8 +229,11 @@ jobs:
             exit 0
           fi
 
-          # Extract only error-relevant lines
-          ERRORS=$(grep -E '\[\!\]|error:|FAILED|fatal|Could not|BUILD FAILED|ARCHIVE FAILED' deploy.log || true)
+          # Extract error-relevant lines — capture 3 lines after [!] for multi-line errors
+          ERRORS=$(grep -E -A3 '\[\!\]' deploy.log | head -20 || true)
+          if [ -z "$ERRORS" ]; then
+            ERRORS=$(grep -E 'error:|FAILED|fatal|Could not|BUILD FAILED|ARCHIVE FAILED' deploy.log || true)
+          fi
 
           if [ -z "$ERRORS" ]; then
             echo "DEPLOY_ERROR_DETAIL=Build failed but no specific error lines captured" >> "$GITHUB_ENV"
@@ -317,8 +320,8 @@ jobs:
           # Error extraction for failure diagnostics
           DEPLOY_ERROR=""
           if [ -f deploy.log ]; then
-            # First try fastlane's own failure markers
-            DEPLOY_ERROR=$(grep -E '^\[\!\]|fastlane finished with errors|\*\* (BUILD|ARCHIVE) FAILED \*\*' deploy.log | tail -1 | sed 's|/[^ ]*source/||g; s|/Users/[^ ]*/||g' | cut -c1-200 || true)
+            # First try fastlane's own failure markers — capture [!] line + continuation
+            DEPLOY_ERROR=$(grep -E -A3 '^\[\!\]' deploy.log | head -4 | tr '\n' ' ' | sed 's|/[^ ]*source/||g; s|/Users/[^ ]*/||g' | cut -c1-200 || true)
             # Fall back to generic error grep only if fastlane markers not found
             if [ -z "$DEPLOY_ERROR" ]; then
               DEPLOY_ERROR=$(grep -i 'error\|fatal\|failed\|Could not' deploy.log | grep -v '^\s*$' | tail -1 | sed 's|/[^ ]*source/||g; s|/Users/[^ ]*/||g' | cut -c1-200 || true)
