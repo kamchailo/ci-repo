@@ -39,9 +39,18 @@ jobs:
           PR_NUMBER=$(echo "$MANIFEST" | jq -r '.pr_number // empty')
 
           # Mask all sensitive values
+          echo "::add-mask::${TEAM_ID}"
           echo "::add-mask::$REF"
           if [ -n "$PR_NUMBER" ]; then
             echo "::add-mask::$PR_NUMBER"
+          fi
+
+          # Validate before GITHUB_ENV writes
+          if ! printf '%s' "$REF" | LC_ALL=C grep -qE '^[a-zA-Z0-9_./-]+$'; then
+            echo "❌ Invalid REF format"; exit 1
+          fi
+          if [ -n "$PR_NUMBER" ] && ! printf '%s' "$PR_NUMBER" | LC_ALL=C grep -qE '^[0-9]+$'; then
+            echo "❌ Invalid PR_NUMBER format"; exit 1
           fi
 
           # Export to env for subsequent steps
@@ -65,11 +74,14 @@ jobs:
           echo "SHA=$SHA" >> "$GITHUB_ENV"
           echo "::add-mask::$SHA"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          jq -n --arg state "pending" --arg url "$RUN_URL" --arg desc "Deploy in progress" --arg ctx "deploy/ci-repo" \
+            '{state: $state, target_url: $url, description: $desc, context: $ctx}' \
+            > $RUNNER_TEMP/status-payload.json
           curl -s -X POST \
             -H "Authorization: token ${PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${PRIVATE_REPO}/statuses/${SHA}" \
-            -d "{\"state\":\"pending\",\"target_url\":\"${RUN_URL}\",\"description\":\"Deploy in progress\",\"context\":\"deploy/ci-repo\"}" -o /dev/null -w "HTTP Status: %{http_code}\n"
+            -d @$RUNNER_TEMP/status-payload.json -o /dev/null -w "HTTP Status: %{http_code}\n"
 
       - name: Select Xcode
         run: |
@@ -116,7 +128,7 @@ jobs:
           security import "$CERT_PATH" \
             -P "$CERT_PASSWORD" \
             -A -t cert -f pkcs12 \
-            -k "$KEYCHAIN_PATH" > /dev/null 2>&1
+            -k "$KEYCHAIN_PATH" > /dev/null 2>&1 || { echo "❌ Failed to import certificate"; exit 1; }
           security set-key-partition-list -S apple-tool:,apple: \
             -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null 2>&1
           security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db > /dev/null 2>&1
@@ -133,12 +145,42 @@ jobs:
           PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< "$PROFILE_PLIST")
           PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print Name" /dev/stdin <<< "$PROFILE_PLIST")
           if [ -z "$PROFILE_UUID" ]; then echo "❌ Could not extract UUID from profile"; exit 1; fi
+          if ! [[ "$PROFILE_UUID" =~ ^[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}$ ]]; then
+            echo "❌ Invalid provisioning profile UUID format"; exit 1
+          fi
+          if [ -z "$PROFILE_NAME" ]; then echo "❌ Could not extract Name from profile"; exit 1; fi
+          if printf '%s' "$PROFILE_NAME" | LC_ALL=C grep -q '[^[:print:]]'; then
+            echo "❌ Profile name contains invalid characters"; exit 1
+          fi
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" /dev/stdin <<< "$PROFILE_PLIST" | sed 's/^[A-Z0-9]*\.//')
+          if [ -z "$BUNDLE_ID" ]; then echo "❌ Could not extract bundle ID from profile"; exit 1; fi
+          if printf '%s' "$BUNDLE_ID" | LC_ALL=C grep -q '[^[:print:]]'; then
+            echo "❌ Bundle ID contains invalid characters"; exit 1
+          fi
+          if ! [[ "$BUNDLE_ID" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]]; then
+            echo "❌ Invalid bundle ID format"; exit 1
+          fi
           cp "$PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/"${PROFILE_UUID}.mobileprovision" > /dev/null 2>&1
           echo "::add-mask::$PROFILE_UUID"
           echo "::add-mask::$PROFILE_NAME"
+          echo "::add-mask::$BUNDLE_ID"
           echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
           echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
-          echo "✅ Profile installed (UUID masked)"
+          echo "BUNDLE_ID=$BUNDLE_ID" >> "$GITHUB_ENV"
+          echo "✅ Profile installed (UUID and bundle ID masked)"
+
+      - name: Generate ExportOptions.plist
+        run: |
+          PLIST_PATH="$RUNNER_TEMP/ExportOptions.plist"
+          /usr/libexec/PlistBuddy \
+            -c "Add :method string app-store" \
+            -c "Add :teamID string ${TEAM_ID}" \
+            -c "Add :signingStyle string manual" \
+            -c "Add :signingCertificate string Apple Distribution" \
+            -c "Add :provisioningProfiles dict" \
+            -c "Add :provisioningProfiles:${BUNDLE_ID} string ${PROFILE_NAME}" \
+            "$PLIST_PATH"
+          echo "✅ ExportOptions.plist generated"
 
       - name: Create App Store Connect API key
         env:
@@ -158,11 +200,14 @@ jobs:
           set -o pipefail
           # Backslash-space in CODE_SIGN_IDENTITY survives double quotes; xcodebuild interprets it
           export GYM_XCARGS="PROVISIONING_PROFILE=${PROFILE_UUID} CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=Apple\ Distribution DEVELOPMENT_TEAM=${TEAM_ID}"
+          export GYM_EXPORT_OPTIONS="$RUNNER_TEMP/ExportOptions.plist"
+          set +e
           bundle exec fastlane beta 2>&1 | tee deploy.log > /dev/null
           FASTLANE_EXIT=${PIPESTATUS[0]}
-          if [ $FASTLANE_EXIT -ne 0 ]; then
+          set -e
+          if [ "$FASTLANE_EXIT" -ne 0 ]; then
             echo "❌ Fastlane exited with code $FASTLANE_EXIT"
-            exit $FASTLANE_EXIT
+            exit "$FASTLANE_EXIT"
           fi
           # Verify fastlane actually started the beta lane
           if [ -f deploy.log ] && ! grep -q 'Driving the lane' deploy.log; then
@@ -251,7 +296,7 @@ jobs:
               'build_number.*[0-9]' \
               'CFBundleVersion.*[0-9]' \
               'Setting.*build.*number.*[0-9]'; do
-              val=$(grep -i "$pattern" deploy.log | grep -o '[0-9][0-9]*' | tail -1 || true)
+              val=$(grep -i "$pattern" deploy.log | grep -oE '[0-9]+' | tail -1 || true)
               if [ -n "$val" ]; then BUILD_NUM="$val"; break; fi
             done
 
@@ -284,6 +329,7 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "APP_NAME=$APP_NAME" >> "$GITHUB_ENV"
           echo "DEPLOY_TS=$DEPLOY_TS" >> "$GITHUB_ENV"
+          DEPLOY_ERROR=$(printf '%s' "$DEPLOY_ERROR" | sed 's/__EOF__/[REDACTED]/g')
           {
             echo "DEPLOY_ERROR<<__EOF__"
             printf '%s' "$DEPLOY_ERROR"
@@ -441,6 +487,8 @@ jobs:
           security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true
           rm -f $RUNNER_TEMP/certificate.p12
           rm -f $RUNNER_TEMP/profile.mobileprovision
+          rm -f $RUNNER_TEMP/ExportOptions.plist
+          rm -f $RUNNER_TEMP/status-payload.json
           rm -rf source
           rm -f $RUNNER_TEMP/comment.json
           rm -f $RUNNER_TEMP/deploy-comment.json
