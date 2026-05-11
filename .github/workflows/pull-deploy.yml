@@ -63,9 +63,24 @@ jobs:
           fi
 
           # Export to env for subsequent steps
-          echo "REF=$REF" >> "$GITHUB_ENV"
-          echo "SHA=$SHA" >> "$GITHUB_ENV"
-          echo "PR_NUMBER=$PR_NUMBER" >> "$GITHUB_ENV"
+          {
+            echo "REF<<__REF_EOF__"
+            printf '%s' "$REF"
+            echo
+            echo "__REF_EOF__"
+          } >> "$GITHUB_ENV"
+          {
+            echo "SHA<<__SHA_EOF__"
+            printf '%s' "$SHA"
+            echo
+            echo "__SHA_EOF__"
+          } >> "$GITHUB_ENV"
+          {
+            echo "PR_NUMBER<<__PR_NUMBER_EOF__"
+            printf '%s' "$PR_NUMBER"
+            echo
+            echo "__PR_NUMBER_EOF__"
+          } >> "$GITHUB_ENV"
 
       - name: Clone private repo
         env:
@@ -170,9 +185,24 @@ jobs:
           echo "::add-mask::$PROFILE_UUID"
           echo "::add-mask::$PROFILE_NAME"
           echo "::add-mask::$BUNDLE_ID"
-          echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
-          echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
-          echo "BUNDLE_ID=$BUNDLE_ID" >> "$GITHUB_ENV"
+          {
+            echo "PROFILE_UUID<<__PROFILE_UUID_EOF__"
+            printf '%s' "$PROFILE_UUID"
+            echo
+            echo "__PROFILE_UUID_EOF__"
+          } >> "$GITHUB_ENV"
+          {
+            echo "PROFILE_NAME<<__PROFILE_NAME_EOF__"
+            printf '%s' "$PROFILE_NAME"
+            echo
+            echo "__PROFILE_NAME_EOF__"
+          } >> "$GITHUB_ENV"
+          {
+            echo "BUNDLE_ID<<__BUNDLE_ID_EOF__"
+            printf '%s' "$BUNDLE_ID"
+            echo
+            echo "__BUNDLE_ID_EOF__"
+          } >> "$GITHUB_ENV"
           echo "✅ Profile installed (UUID and bundle ID masked)"
 
       - name: Generate ExportOptions.plist
@@ -231,7 +261,12 @@ jobs:
           TEAM_ID: ${{ secrets.TEAM_ID }}
         run: |
           if [ ! -f deploy.log ]; then
-            echo "DEPLOY_ERROR_DETAIL=No deploy.log found" >> "$GITHUB_ENV"
+            {
+              echo "DEPLOY_ERROR_DETAIL<<__DEPLOY_ERROR_DETAIL_EOF__"
+              printf '%s' "No deploy.log found"
+              echo
+              echo "__DEPLOY_ERROR_DETAIL_EOF__"
+            } >> "$GITHUB_ENV"
             exit 0
           fi
 
@@ -242,7 +277,12 @@ jobs:
           fi
 
           if [ -z "$ERRORS" ]; then
-            echo "DEPLOY_ERROR_DETAIL=Build failed but no specific error lines captured" >> "$GITHUB_ENV"
+            {
+              echo "DEPLOY_ERROR_DETAIL<<__DEPLOY_ERROR_DETAIL_EOF__"
+              printf '%s' "Build failed but no specific error lines captured"
+              echo
+              echo "__DEPLOY_ERROR_DETAIL_EOF__"
+            } >> "$GITHUB_ENV"
             exit 0
           fi
 
@@ -334,10 +374,30 @@ jobs:
             fi
           fi
 
-          echo "BUILD_NUM=$BUILD_NUM" >> "$GITHUB_ENV"
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "APP_NAME=$APP_NAME" >> "$GITHUB_ENV"
-          echo "DEPLOY_TS=$DEPLOY_TS" >> "$GITHUB_ENV"
+          {
+            echo "BUILD_NUM<<__BUILD_NUM_EOF__"
+            printf '%s' "$BUILD_NUM"
+            echo
+            echo "__BUILD_NUM_EOF__"
+          } >> "$GITHUB_ENV"
+          {
+            echo "VERSION<<__VERSION_EOF__"
+            printf '%s' "$VERSION"
+            echo
+            echo "__VERSION_EOF__"
+          } >> "$GITHUB_ENV"
+          {
+            echo "APP_NAME<<__APP_NAME_EOF__"
+            printf '%s' "$APP_NAME"
+            echo
+            echo "__APP_NAME_EOF__"
+          } >> "$GITHUB_ENV"
+          {
+            echo "DEPLOY_TS<<__DEPLOY_TS_EOF__"
+            printf '%s' "$DEPLOY_TS"
+            echo
+            echo "__DEPLOY_TS_EOF__"
+          } >> "$GITHUB_ENV"
           DEPLOY_ERROR=$(printf '%s' "$DEPLOY_ERROR" | sed 's/__EOF__/[REDACTED]/g')
           {
             echo "DEPLOY_ERROR<<__EOF__"

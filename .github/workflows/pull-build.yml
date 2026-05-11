@@ -48,9 +48,24 @@ jobs:
           fi
 
           # Export to env for subsequent steps
-          echo "REF=$REF" >> "$GITHUB_ENV"
-          echo "SHA=$SHA" >> "$GITHUB_ENV"
-          echo "PR_NUMBER=$PR_NUMBER" >> "$GITHUB_ENV"
+          {
+            echo "REF<<__REF_EOF__"
+            printf '%s' "$REF"
+            echo
+            echo "__REF_EOF__"
+          } >> "$GITHUB_ENV"
+          {
+            echo "SHA<<__SHA_EOF__"
+            printf '%s' "$SHA"
+            echo
+            echo "__SHA_EOF__"
+          } >> "$GITHUB_ENV"
+          {
+            echo "PR_NUMBER<<__PR_NUMBER_EOF__"
+            printf '%s' "$PR_NUMBER"
+            echo
+            echo "__PR_NUMBER_EOF__"
+          } >> "$GITHUB_ENV"
 
       - name: Clone private repo
         env:
@@ -156,7 +171,12 @@ jobs:
           fi
 
           if [ -z "$LOG_FILE" ]; then
-            echo "SANITIZED_LOG=No log file found" >> "$GITHUB_ENV"
+            {
+              echo "SANITIZED_LOG<<__SANITIZED_LOG_EOF__"
+              printf '%s' "No log file found"
+              echo
+              echo "__SANITIZED_LOG_EOF__"
+            } >> "$GITHUB_ENV"
             exit 0
           fi
 
