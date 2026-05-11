@@ -5,6 +5,10 @@ on:
     types: [deploy]
   workflow_dispatch:
 
+concurrency:
+  group: testflight-deploy-execution
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: macos-15
