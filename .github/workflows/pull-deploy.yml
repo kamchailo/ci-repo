@@ -40,11 +40,13 @@ jobs:
           MANIFEST=$(echo "$RESPONSE" | jq -r '.content' | base64 -d)
 
           REF=$(echo "$MANIFEST" | jq -r '.ref')
+          SHA=$(echo "$MANIFEST" | jq -r '.sha')
           PR_NUMBER=$(echo "$MANIFEST" | jq -r '.pr_number // empty')
 
           # Mask all sensitive values
           echo "::add-mask::${TEAM_ID}"
           echo "::add-mask::$REF"
+          echo "::add-mask::$SHA"
           if [ -n "$PR_NUMBER" ]; then
             echo "::add-mask::$PR_NUMBER"
           fi
@@ -53,12 +55,16 @@ jobs:
           if ! printf '%s' "$REF" | LC_ALL=C grep -qE '^[a-zA-Z0-9_./-]+$'; then
             echo "❌ Invalid REF format"; exit 1
           fi
+          if ! printf '%s' "$SHA" | LC_ALL=C grep -qE '^[0-9a-f]{40}$'; then
+            echo "❌ Invalid SHA format"; exit 1
+          fi
           if [ -n "$PR_NUMBER" ] && ! printf '%s' "$PR_NUMBER" | LC_ALL=C grep -qE '^[0-9]+$'; then
             echo "❌ Invalid PR_NUMBER format"; exit 1
           fi
 
           # Export to env for subsequent steps
           echo "REF=$REF" >> "$GITHUB_ENV"
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
           echo "PR_NUMBER=$PR_NUMBER" >> "$GITHUB_ENV"
 
       - name: Clone private repo
@@ -73,10 +79,6 @@ jobs:
         env:
           PAT: ${{ secrets.PRIVATE_REPO_PAT }}
         run: |
-          cd source
-          SHA=$(git rev-parse HEAD)
-          echo "SHA=$SHA" >> "$GITHUB_ENV"
-          echo "::add-mask::$SHA"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           jq -n --arg state "pending" --arg url "$RUN_URL" --arg desc "Deploy in progress" --arg ctx "deploy/ci-repo" \
             '{state: $state, target_url: $url, description: $desc, context: $ctx}' \
